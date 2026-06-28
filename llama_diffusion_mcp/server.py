@@ -3,6 +3,7 @@ import argparse
 import subprocess
 import sys
 import logging
+import re
 from fastmcp import FastMCP
 
 # ==========================================
@@ -29,7 +30,8 @@ model_group.add_argument("-hf", "--hf-repo", type=str, help="Hugging Face model 
 parser.add_argument("-hff", "--hf-file", type=str, help="Hugging Face model file override")
 parser.add_argument("-hft", "--hf-token", type=str, help="Hugging Face access token")
 
-# Core Performance Parameters
+# Core Performance & Token Parameters
+parser.add_argument("-n", "--predict", type=int, help="Number of tokens to predict (-1 = infinity)")
 parser.add_argument("-ngl", "--n-gpu-layers", type=int, help="Max number of layers to store in VRAM")
 parser.add_argument("-t", "--threads", type=int, help="Number of CPU threads to use")
 parser.add_argument("-fa", "--flash-attn", type=str, choices=["on", "off", "auto"])
@@ -77,7 +79,6 @@ sys.argv = [sys.argv[0]] + unknown_args # Clean args for FastMCP
 CLI_EXECUTABLE = os.environ.get("LLAMA_DIFFUSION_CLI_PATH", "llama-diffusion-cli")
 logger.info(f"Resolved Executable Path: {CLI_EXECUTABLE}")
 
-# Notice: We removed the -cnv flag here.
 BASE_COMMAND = [CLI_EXECUTABLE]
 
 if args.model:
@@ -87,6 +88,7 @@ elif args.hf_repo:
 
 FLAG_MAPPING = {
     "hf_file": "-hff", "hf_token": "-hft",
+    "predict": "-n", # NEW: Added token limit parameter
     "n_gpu_layers": "-ngl", "threads": "-t", "flash_attn": "-fa", 
     "ctx_size": "-c", "ubatch_size": "-ub", "batch_size": "-b",
     "diffusion_steps": "--diffusion-steps", "diffusion_blocks": "--diffusion-blocks",
@@ -112,9 +114,29 @@ if args.diffusion_visual:
 if args.diffusion_visual_progress:
     BASE_COMMAND.append("--diffusion-visual-progress")
 
+# ==========================================
+# 3. Output Processing Helper
+# ==========================================
+def clean_terminal_output(raw_text: str) -> str:
+    """
+    Strips ANSI color codes and resolves carriage returns (\\r) 
+    so progress bars do not corrupt the final text string returned to the LLM.
+    """
+    # Remove ANSI escape sequences
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    text = ansi_escape.sub('', raw_text)
+    
+    # Resolve \r (carriage return) overwrites
+    clean_lines = []
+    for line in text.split('\n'):
+        # If a line contains \r, a terminal only displays what comes AFTER the last \r
+        parts = line.split('\r')
+        clean_lines.append(parts[-1])
+        
+    return '\n'.join(clean_lines).strip()
 
 # ==========================================
-# 3. FastMCP Server Setup
+# 4. FastMCP Server Setup
 # ==========================================
 mcp = FastMCP("LlamaDiffusionBridge")
 
@@ -122,18 +144,13 @@ mcp = FastMCP("LlamaDiffusionBridge")
 def generate_diffusion_text(prompt: str) -> str:
     """
     Generates text using a diffusion-based LLM. This is a one-shot process.
-    
-    Args:
-        prompt: The exact prompt or instruction to send to the model.
     """
-    # Append the prompt specific to this tool call
     command = BASE_COMMAND.copy()
     command.extend(["-p", prompt])
     
     logger.info(f"Executing generation for prompt: '{prompt}'")
     
     try:
-        # Run synchronously. llama.cpp prints generation to stdout, and logs/telemetry to stderr.
         result = subprocess.run(
             command,
             capture_output=True,
@@ -141,7 +158,8 @@ def generate_diffusion_text(prompt: str) -> str:
             check=True
         )
         
-        generated_text = result.stdout.strip()
+        # Process the raw output through our terminal cleaner
+        generated_text = clean_terminal_output(result.stdout)
         logger.info("Generation successful.")
         
         return generated_text
