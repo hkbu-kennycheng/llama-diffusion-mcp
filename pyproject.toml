@@ -1,5 +1,5 @@
 [project]
-name = "llama-diffusion-cli-mcp"
+name = "llama-diffusion-mcp"
 version = "0.1.0"
 description = "A Model Context Protocol (MCP) server bridging requests to llama-diffusion-cli"
 readme = "README.md"
@@ -11,7 +11,7 @@ dependencies = [
 
 # This maps a command-line shortcut directly to your script's execution function
 [project.scripts]
-llama-diffusion-cli-mcp = "server:main"
+llama-diffusion-mcp = "llama_diffusion_cli_mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]
