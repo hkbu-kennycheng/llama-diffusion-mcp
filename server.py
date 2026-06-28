@@ -1,3 +1,4 @@
+import os
 import argparse
 import subprocess
 import sys
@@ -36,9 +37,14 @@ args, unknown_args = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + unknown_args # Clean args for FastMCP
 
 # ==========================================
-# 2. Build Base CLI Command
+# 2. Resolve Executable Path via Environment Variable
 # ==========================================
-BASE_COMMAND = ["llama-diffusion-cli", "-m", args.model]
+# Looks for LLAMA_DIFFUSION_CLI_PATH in the environment. Defaults to global command if missing.
+CLI_EXECUTABLE = os.environ.get("LLAMA_DIFFUSION_CLI_PATH", "llama-diffusion-cli")
+logger.info(f"Using llama-diffusion-cli executable location: {CLI_EXECUTABLE}")
+
+# Build Base CLI Command
+BASE_COMMAND = [CLI_EXECUTABLE, "-m", args.model]
 
 if args.interactive:
     BASE_COMMAND.append("-i")
@@ -123,21 +129,17 @@ class InteractiveDiffusionCLI:
             if self.process is not None and self.process.poll() is None:
                 logger.info("Sending graceful '/exit' command to llama-diffusion-cli...")
                 try:
-                    # Attempt a clean interactive exit command
                     self.process.stdin.write("/exit\n")
                     self.process.stdin.flush()
-                    # Wait up to 3 seconds for the tool to shut itself down safely
                     self.process.wait(timeout=3)
                 except (IOError, BrokenPipeError):
                     logger.warning("Pipe broken while sending /exit. CLI may have already closed.")
                 except subprocess.TimeoutExpired:
-                    # Fallback 1: If /exit fails to trigger a prompt shutdown, send SIGTERM
                     logger.warning("CLI did not respond to /exit. Attempting standard termination...")
                     self.process.terminate()
                     try:
                         self.process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
-                        # Fallback 2: Hard kill if it refuses to yield
                         logger.error("CLI hung on SIGTERM. Escalating to force-kill...")
                         self.process.kill()
                 finally:
@@ -162,9 +164,6 @@ mcp = FastMCP("LlamaDiffusionChatBridge")
 def chat_with_diffusion(prompt: str) -> str:
     """
     Sends a message to the persistently running Diffusion LLM and returns the generated text.
-    
-    Args:
-        prompt: The user's input/prompt to send to the model.
     """
     try:
         return cli_manager.generate(prompt)
@@ -176,7 +175,6 @@ def chat_with_diffusion(prompt: str) -> str:
 def restart_chat_session() -> str:
     """
     Gracefully exits the current chat process using an internal exit routine and starts a fresh session.
-    Use this tool when the user explicitly requests to clear chat history, start over, or flip to a completely new topic.
     """
     try:
         return cli_manager.reset_session()
