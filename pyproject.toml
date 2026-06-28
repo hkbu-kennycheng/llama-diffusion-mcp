@@ -11,7 +11,7 @@ dependencies = [
 
 # This maps a command-line shortcut directly to your script's execution function
 [project.scripts]
-llama-diffusion-mcp = "llama_diffusion_cli_mcp.server:main"
+llama-diffusion-mcp = "llama_diffusion_mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]
