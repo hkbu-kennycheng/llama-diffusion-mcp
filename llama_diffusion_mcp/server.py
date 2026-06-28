@@ -2,10 +2,7 @@ import os
 import argparse
 import subprocess
 import sys
-import threading
 import logging
-import time
-import re  # Added for ANSI escape code stripping
 from fastmcp import FastMCP
 
 # ==========================================
@@ -21,16 +18,18 @@ logger = logging.getLogger(__name__)
 # ==========================================
 # 1. Parse Initialization Parameters
 # ==========================================
-parser = argparse.ArgumentParser(description="Persistent FastMCP Bridge for llama-diffusion-cli")
+parser = argparse.ArgumentParser(description="One-Shot FastMCP Bridge for llama-diffusion-cli")
 
-parser.add_argument("--mcp-prompt-marker", type=str, default="> ", help="The string the CLI prints when waiting for user input (default: '> ')")
-
+# Mutually Exclusive Model Source Group (Required)
 model_group = parser.add_mutually_exclusive_group(required=True)
 model_group.add_argument("-m", "--model", type=str, help="Path to the local GGUF model file")
 model_group.add_argument("-hf", "--hf-repo", type=str, help="Hugging Face model repository (e.g., user/model:quant)")
 
+# Hugging Face Optional Helpers
 parser.add_argument("-hff", "--hf-file", type=str, help="Hugging Face model file override")
 parser.add_argument("-hft", "--hf-token", type=str, help="Hugging Face access token")
+
+# Core Performance Parameters
 parser.add_argument("-ngl", "--n-gpu-layers", type=int, help="Max number of layers to store in VRAM")
 parser.add_argument("-t", "--threads", type=int, help="Number of CPU threads to use")
 parser.add_argument("-fa", "--flash-attn", type=str, choices=["on", "off", "auto"])
@@ -51,7 +50,7 @@ parser.add_argument("--diffusion-block-length", type=int)
 parser.add_argument("--diffusion-cfg-scale", type=float)
 parser.add_argument("--diffusion-add-gumbel-noise", type=float)
 
-# Entropy-Bound Parameters
+# Entropy-Bound (DiffusionGemma Specific Optimizations)
 parser.add_argument("--diffusion-eb", type=str, choices=["auto", "on", "off"])
 parser.add_argument("--diffusion-eb-t-min", type=float)
 parser.add_argument("--diffusion-eb-t-max", type=float)
@@ -70,7 +69,7 @@ parser.add_argument("--top-p", type=float)
 parser.add_argument("--min-p", type=float)
 
 args, unknown_args = parser.parse_known_args()
-sys.argv = [sys.argv[0]] + unknown_args 
+sys.argv = [sys.argv[0]] + unknown_args # Clean args for FastMCP
 
 # ==========================================
 # 2. Build Base CLI Command
@@ -78,7 +77,8 @@ sys.argv = [sys.argv[0]] + unknown_args
 CLI_EXECUTABLE = os.environ.get("LLAMA_DIFFUSION_CLI_PATH", "llama-diffusion-cli")
 logger.info(f"Resolved Executable Path: {CLI_EXECUTABLE}")
 
-BASE_COMMAND = [CLI_EXECUTABLE, "-cnv"]
+# Notice: We removed the -cnv flag here.
+BASE_COMMAND = [CLI_EXECUTABLE]
 
 if args.model:
     BASE_COMMAND.extend(["-m", args.model])
@@ -114,185 +114,55 @@ if args.diffusion_visual_progress:
 
 
 # ==========================================
-# 3. Persistent Process Manager
+# 3. FastMCP Server Setup
 # ==========================================
-class InteractiveDiffusionCLI:
-    def __init__(self, command: list[str], prompt_marker: str):
-        self.command = command
-        self.prompt_marker = prompt_marker
-        self.process = None
-        self.lock = threading.Lock()
-
-    def start(self):
-        with self.lock:
-            if self.process is None or self.process.poll() is not None:
-                self._start_process()
-                
-    def _start_process(self):
-        logger.info(f"Spawning CLI process with exact command:\n{' '.join(self.command)}")
-        try:
-            self.process = subprocess.Popen(
-                self.command,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, 
-                text=True,
-                bufsize=0 
-            )
-        except Exception as e:
-            logger.error(f"FATAL: Python failed to launch the executable. Error: {e}")
-            raise e
-            
-        time.sleep(0.5) 
-        return_code = self.process.poll()
-        if return_code is not None:
-            stdout_left, _ = self.process.communicate()
-            logger.error(f"FATAL: Process crashed instantly with Exit Code {return_code}.")
-            logger.error(f"--- INSTANT CRASH OUTPUT ---\n{stdout_left.strip()}\n----------------------------")
-            raise RuntimeError("CLI terminated immediately after launch.")
-        
-        logger.info("CLI spawned successfully. Beginning initialization sequence...")
-        self._read_until_marker(is_initializing=True)
-        logger.info("Initialization complete. Model is fully loaded and ready for prompts.")
-
-    def _read_until_marker(self, is_initializing=False) -> str:
-        """Reads character by character, clearing the buffer on \\r to hide progress loops."""
-        suffix_buffer = ""
-        marker_len = len(self.prompt_marker)
-        
-        current_line = []
-        final_output = []
-        
-        while True:
-            char = self.process.stdout.read(1)
-            
-            if not char:
-                return_code = self.process.poll()
-                crash_log = "\n".join(final_output) + "".join(current_line)
-                logger.error(f"FATAL: CLI process stream closed unexpectedly. Exit Code: {return_code}")
-                if return_code in [-9, 137]:
-                    logger.error("HINT: Exit code -9/137 usually means Out of Memory (OOM Kill by OS).")
-                logger.error(f"--- LAST OUTPUT BEFORE CRASH ---\n{crash_log.strip()}\n--------------------------------")
-                break
-                
-            suffix_buffer += char
-            if len(suffix_buffer) > marker_len:
-                suffix_buffer = suffix_buffer[-marker_len:]
-                
-            # --- The Terminal Emulator Logic ---
-            if char == '\r':
-                # Clear the uncommitted line (deletes the visual progress frame)
-                current_line = []
-            elif char == '\b':
-                # Handle backspaces
-                if current_line:
-                    current_line.pop()
-            elif char == '\n':
-                # Commit the line permanently
-                line_str = "".join(current_line)
-                if is_initializing:
-                    logger.info(f"[CLI INIT] {line_str.strip()}")
-                final_output.append(line_str)
-                current_line = []
-            else:
-                current_line.append(char)
-                
-            # Check if we hit the prompt marker (e.g. "> ")
-            if suffix_buffer == self.prompt_marker:
-                line_str = "".join(current_line)
-                final_output.append(line_str)
-                
-                # Combine all committed lines
-                raw_text = "\n".join(final_output)
-                
-                # Slice off the exact marker string at the end
-                if raw_text.endswith(self.prompt_marker):
-                    raw_text = raw_text[:-marker_len]
-                    
-                # Strip out any remaining ANSI escape codes (colors, clear lines, cursors)
-                clean_text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', raw_text)
-                
-                return clean_text.strip()
-                
-        return "".join(final_output).strip()
-
-    def generate(self, prompt: str) -> str:
-        with self.lock:
-            if self.process is None or self.process.poll() is not None:
-                logger.warning("CLI process was dead. Restarting...")
-                self._start_process()
-                
-            logger.info(f"Sending prompt to model: {prompt}")
-            self.process.stdin.write(prompt + "\n")
-            self.process.stdin.flush()
-            
-            # The terminal emulator blocks here, dropping \r frames, until > is reached
-            response = self._read_until_marker(is_initializing=False)
-            logger.info("Finished receiving clean generation.")
-            return response
-
-    def reset_session(self) -> str:
-        with self.lock:
-            if self.process is not None and self.process.poll() is None:
-                logger.info("Sending graceful '/exit' command to llama-diffusion-cli...")
-                try:
-                    self.process.stdin.write("/exit\n")
-                    self.process.stdin.flush()
-                    self.process.wait(timeout=3)
-                except (IOError, BrokenPipeError):
-                    pass
-                except subprocess.TimeoutExpired:
-                    self.process.terminate()
-                    try:
-                        self.process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        self.process.kill()
-                finally:
-                    self.process = None
-            else:
-                self.process = None
-            
-            logger.info("Initializing a brand new chat session...")
-            self._start_process()
-            return "Successfully reset! Sent '/exit' to clean up the previous session, and a new conversation context is ready."
-
-cli_manager = InteractiveDiffusionCLI(BASE_COMMAND, args.mcp_prompt_marker)
-
-# ==========================================
-# 4. FastMCP Server Setup
-# ==========================================
-mcp = FastMCP("LlamaDiffusionChatBridge")
+mcp = FastMCP("LlamaDiffusionBridge")
 
 @mcp.tool()
-def chat_with_diffusion(prompt: str) -> str:
+def generate_diffusion_text(prompt: str) -> str:
     """
-    Sends a message to the persistently running Diffusion LLM and returns the generated text.
+    Generates text using a diffusion-based LLM. This is a one-shot process.
+    
+    Args:
+        prompt: The exact prompt or instruction to send to the model.
     """
+    # Append the prompt specific to this tool call
+    command = BASE_COMMAND.copy()
+    command.extend(["-p", prompt])
+    
+    logger.info(f"Executing generation for prompt: '{prompt}'")
+    
     try:
-        return cli_manager.generate(prompt)
+        # Run synchronously. llama.cpp prints generation to stdout, and logs/telemetry to stderr.
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        generated_text = result.stdout.strip()
+        logger.info("Generation successful.")
+        
+        return generated_text
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"FATAL: CLI process crashed. Exit Code {e.returncode}.")
+        logger.error(f"--- STANDARD ERROR (LOGS) ---\n{e.stderr.strip()}\n-----------------------------")
+        
+        if e.returncode in [-9, 137]:
+            return "Error: The generation failed because the OS killed the process (Out of Memory). Try reducing context size or offloading more layers to VRAM."
+            
+        return (
+            f"Error: Failed to generate text. CLI exited with code {e.returncode}.\n"
+            f"Details: {e.stderr.strip()}"
+        )
     except Exception as e:
-        logger.error(f"Generation failed: {str(e)}")
-        return f"Error communicating with diffusion CLI: {str(e)}"
-
-@mcp.tool()
-def restart_chat_session() -> str:
-    """
-    Gracefully exits the current chat process using an internal exit routine and starts a fresh session.
-    """
-    try:
-        return cli_manager.reset_session()
-    except Exception as e:
-        logger.error(f"Failed to restart session: {str(e)}")
-        return f"Error trying to restart the session: {str(e)}"
+        logger.error(f"Unexpected Python error during generation: {e}")
+        return f"Error communicating with diffusion CLI: {e}"
 
 def main():
-    logger.info("Eagerly initializing llama-diffusion-cli process on startup...")
-    try:
-        cli_manager.start()
-    except Exception as e:
-        logger.error(f"Server Startup Aborted: {e}")
-        sys.exit(1)
-        
+    logger.info("Starting One-Shot FastMCP Server...")
     mcp.run()
 
 if __name__ == "__main__":
