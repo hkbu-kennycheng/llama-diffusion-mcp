@@ -5,6 +5,7 @@ import sys
 import threading
 import logging
 import time
+import re  # Added for ANSI escape code stripping
 from fastmcp import FastMCP
 
 # ==========================================
@@ -113,7 +114,7 @@ if args.diffusion_visual_progress:
 
 
 # ==========================================
-# 3. Persistent Process Manager (Debug Enhanced)
+# 3. Persistent Process Manager
 # ==========================================
 class InteractiveDiffusionCLI:
     def __init__(self, command: list[str], prompt_marker: str):
@@ -129,13 +130,12 @@ class InteractiveDiffusionCLI:
                 
     def _start_process(self):
         logger.info(f"Spawning CLI process with exact command:\n{' '.join(self.command)}")
-        
         try:
             self.process = subprocess.Popen(
                 self.command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, # Combines stderr into stdout stream
+                stderr=subprocess.STDOUT, 
                 text=True,
                 bufsize=0 
             )
@@ -143,8 +143,7 @@ class InteractiveDiffusionCLI:
             logger.error(f"FATAL: Python failed to launch the executable. Error: {e}")
             raise e
             
-        # --- DEBUG: Immediate Crash Check ---
-        time.sleep(0.5) # Give the binary 500ms to fail on argument parsing
+        time.sleep(0.5) 
         return_code = self.process.poll()
         if return_code is not None:
             stdout_left, _ = self.process.communicate()
@@ -157,42 +156,65 @@ class InteractiveDiffusionCLI:
         logger.info("Initialization complete. Model is fully loaded and ready for prompts.")
 
     def _read_until_marker(self, is_initializing=False) -> str:
-        result_chars = []
+        """Reads character by character, clearing the buffer on \\r to hide progress loops."""
         suffix_buffer = ""
-        line_buffer = ""
         marker_len = len(self.prompt_marker)
+        
+        current_line = []
+        final_output = []
         
         while True:
             char = self.process.stdout.read(1)
             
             if not char:
-                # --- DEBUG: EOF Crash Check ---
                 return_code = self.process.poll()
-                crash_log = "".join(result_chars).strip()
+                crash_log = "\n".join(final_output) + "".join(current_line)
                 logger.error(f"FATAL: CLI process stream closed unexpectedly. Exit Code: {return_code}")
                 if return_code in [-9, 137]:
                     logger.error("HINT: Exit code -9/137 usually means Out of Memory (OOM Kill by OS).")
-                logger.error(f"--- LAST OUTPUT BEFORE CRASH ---\n{crash_log}\n--------------------------------")
+                logger.error(f"--- LAST OUTPUT BEFORE CRASH ---\n{crash_log.strip()}\n--------------------------------")
                 break
                 
-            result_chars.append(char)
             suffix_buffer += char
-            line_buffer += char
-            
-            # --- DEBUG: Real-Time Line Streaming ---
-            # If we hit a newline during the heavy initialization phase, print it to the console!
-            if is_initializing and char == '\n':
-                logger.info(f"[CLI INIT] {line_buffer.strip()}")
-                line_buffer = ""
-            
             if len(suffix_buffer) > marker_len:
                 suffix_buffer = suffix_buffer[-marker_len:]
                 
-            if suffix_buffer == self.prompt_marker:
-                result = "".join(result_chars)
-                return result[:-marker_len].strip()
+            # --- The Terminal Emulator Logic ---
+            if char == '\r':
+                # Clear the uncommitted line (deletes the visual progress frame)
+                current_line = []
+            elif char == '\b':
+                # Handle backspaces
+                if current_line:
+                    current_line.pop()
+            elif char == '\n':
+                # Commit the line permanently
+                line_str = "".join(current_line)
+                if is_initializing:
+                    logger.info(f"[CLI INIT] {line_str.strip()}")
+                final_output.append(line_str)
+                current_line = []
+            else:
+                current_line.append(char)
                 
-        return "".join(result_chars).strip()
+            # Check if we hit the prompt marker (e.g. "> ")
+            if suffix_buffer == self.prompt_marker:
+                line_str = "".join(current_line)
+                final_output.append(line_str)
+                
+                # Combine all committed lines
+                raw_text = "\n".join(final_output)
+                
+                # Slice off the exact marker string at the end
+                if raw_text.endswith(self.prompt_marker):
+                    raw_text = raw_text[:-marker_len]
+                    
+                # Strip out any remaining ANSI escape codes (colors, clear lines, cursors)
+                clean_text = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', raw_text)
+                
+                return clean_text.strip()
+                
+        return "".join(final_output).strip()
 
     def generate(self, prompt: str) -> str:
         with self.lock:
@@ -204,8 +226,9 @@ class InteractiveDiffusionCLI:
             self.process.stdin.write(prompt + "\n")
             self.process.stdin.flush()
             
+            # The terminal emulator blocks here, dropping \r frames, until > is reached
             response = self._read_until_marker(is_initializing=False)
-            logger.info("Finished receiving generation.")
+            logger.info("Finished receiving clean generation.")
             return response
 
     def reset_session(self) -> str:
@@ -217,14 +240,12 @@ class InteractiveDiffusionCLI:
                     self.process.stdin.flush()
                     self.process.wait(timeout=3)
                 except (IOError, BrokenPipeError):
-                    logger.warning("Pipe broken while sending /exit. CLI may have already closed.")
+                    pass
                 except subprocess.TimeoutExpired:
-                    logger.warning("CLI did not respond to /exit. Attempting standard termination...")
                     self.process.terminate()
                     try:
                         self.process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
-                        logger.error("CLI hung on SIGTERM. Escalating to force-kill...")
                         self.process.kill()
                 finally:
                     self.process = None
