@@ -25,8 +25,16 @@ parser = argparse.ArgumentParser(description="Persistent FastMCP Bridge for llam
 parser.add_argument("--mcp-prompt-marker", type=str, default="> ", 
                     help="The string the CLI prints when waiting for user input (default: '> ')")
 
-# Core Model & Performance Parameters
-parser.add_argument("-m", "--model", type=str, required=True, help="Path to the GGUF model file")
+# Mutually Exclusive Model Source Group (Required)
+model_group = parser.add_mutually_exclusive_group(required=True)
+model_group.add_argument("-m", "--model", type=str, help="Path to the local GGUF model file")
+model_group.add_argument("-hf", "--hf-repo", type=str, help="Hugging Face model repository (e.g., user/model:quant)")
+
+# Hugging Face Optional Helpers
+parser.add_argument("-hff", "--hf-file", type=str, help="Hugging Face model file override")
+parser.add_argument("-hft", "--hf-token", type=str, help="Hugging Face access token")
+
+# Core Performance Parameters
 parser.add_argument("-ngl", "--n-gpu-layers", type=int, help="Max number of layers to store in VRAM")
 parser.add_argument("-t", "--threads", type=int, help="Number of CPU threads to use")
 parser.add_argument("-fa", "--flash-attn", type=str, choices=["on", "off", "auto"])
@@ -75,9 +83,17 @@ CLI_EXECUTABLE = os.environ.get("LLAMA_DIFFUSION_CLI_PATH", "llama-diffusion-cli
 logger.info(f"Using llama-diffusion-cli executable location: {CLI_EXECUTABLE}")
 
 # Enforce -cnv (Conversation/Interactive mode) so the background process stays alive
-BASE_COMMAND = [CLI_EXECUTABLE, "-m", args.model, "-cnv"]
+BASE_COMMAND = [CLI_EXECUTABLE, "-cnv"]
 
+# Route the mutually exclusive model source argument
+if args.model:
+    BASE_COMMAND.extend(["-m", args.model])
+elif args.hf_repo:
+    BASE_COMMAND.extend(["-hf", args.hf_repo])
+
+# Map the rest of the optional arguments
 FLAG_MAPPING = {
+    "hf_file": "-hff", "hf_token": "-hft",
     "n_gpu_layers": "-ngl", "threads": "-t", "flash_attn": "-fa", 
     "ctx_size": "-c", "ubatch_size": "-ub", "batch_size": "-b",
     "diffusion_steps": "--diffusion-steps", "diffusion_blocks": "--diffusion-blocks",
