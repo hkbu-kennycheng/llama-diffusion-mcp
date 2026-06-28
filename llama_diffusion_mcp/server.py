@@ -99,8 +99,10 @@ class InteractiveDiffusionCLI:
         
         while True:
             char = self.process.stdout.read(1)
+            
             if not char:
-                logger.error("CLI process EOF reached unexpectedly.")
+                crash_log = "".join(result_chars).strip()
+                logger.error(f"CLI process EOF reached unexpectedly.\nLast output before crash:\n{crash_log}")
                 break
                 
             result_chars.append(char)
