@@ -4,6 +4,7 @@ import subprocess
 import sys
 import threading
 import logging
+import time
 from fastmcp import FastMCP
 
 # ==========================================
@@ -21,20 +22,14 @@ logger = logging.getLogger(__name__)
 # ==========================================
 parser = argparse.ArgumentParser(description="Persistent FastMCP Bridge for llama-diffusion-cli")
 
-# MCP Bridge Specific
-parser.add_argument("--mcp-prompt-marker", type=str, default="> ", 
-                    help="The string the CLI prints when waiting for user input (default: '> ')")
+parser.add_argument("--mcp-prompt-marker", type=str, default="> ", help="The string the CLI prints when waiting for user input (default: '> ')")
 
-# Mutually Exclusive Model Source Group (Required)
 model_group = parser.add_mutually_exclusive_group(required=True)
 model_group.add_argument("-m", "--model", type=str, help="Path to the local GGUF model file")
 model_group.add_argument("-hf", "--hf-repo", type=str, help="Hugging Face model repository (e.g., user/model:quant)")
 
-# Hugging Face Optional Helpers
 parser.add_argument("-hff", "--hf-file", type=str, help="Hugging Face model file override")
 parser.add_argument("-hft", "--hf-token", type=str, help="Hugging Face access token")
-
-# Core Performance Parameters
 parser.add_argument("-ngl", "--n-gpu-layers", type=int, help="Max number of layers to store in VRAM")
 parser.add_argument("-t", "--threads", type=int, help="Number of CPU threads to use")
 parser.add_argument("-fa", "--flash-attn", type=str, choices=["on", "off", "auto"])
@@ -55,7 +50,7 @@ parser.add_argument("--diffusion-block-length", type=int)
 parser.add_argument("--diffusion-cfg-scale", type=float)
 parser.add_argument("--diffusion-add-gumbel-noise", type=float)
 
-# Entropy-Bound (DiffusionGemma Specific Optimizations)
+# Entropy-Bound Parameters
 parser.add_argument("--diffusion-eb", type=str, choices=["auto", "on", "off"])
 parser.add_argument("--diffusion-eb-t-min", type=float)
 parser.add_argument("--diffusion-eb-t-max", type=float)
@@ -74,24 +69,21 @@ parser.add_argument("--top-p", type=float)
 parser.add_argument("--min-p", type=float)
 
 args, unknown_args = parser.parse_known_args()
-sys.argv = [sys.argv[0]] + unknown_args # Clean args for FastMCP
+sys.argv = [sys.argv[0]] + unknown_args 
 
 # ==========================================
 # 2. Build Base CLI Command
 # ==========================================
 CLI_EXECUTABLE = os.environ.get("LLAMA_DIFFUSION_CLI_PATH", "llama-diffusion-cli")
-logger.info(f"Using llama-diffusion-cli executable location: {CLI_EXECUTABLE}")
+logger.info(f"Resolved Executable Path: {CLI_EXECUTABLE}")
 
-# Enforce -cnv (Conversation/Interactive mode) so the background process stays alive
 BASE_COMMAND = [CLI_EXECUTABLE, "-cnv"]
 
-# Route the mutually exclusive model source argument
 if args.model:
     BASE_COMMAND.extend(["-m", args.model])
 elif args.hf_repo:
     BASE_COMMAND.extend(["-hf", args.hf_repo])
 
-# Map the rest of the optional arguments
 FLAG_MAPPING = {
     "hf_file": "-hff", "hf_token": "-hft",
     "n_gpu_layers": "-ngl", "threads": "-t", "flash_attn": "-fa", 
@@ -121,7 +113,7 @@ if args.diffusion_visual_progress:
 
 
 # ==========================================
-# 3. Persistent Process Manager
+# 3. Persistent Process Manager (Debug Enhanced)
 # ==========================================
 class InteractiveDiffusionCLI:
     def __init__(self, command: list[str], prompt_marker: str):
@@ -136,35 +128,62 @@ class InteractiveDiffusionCLI:
                 self._start_process()
                 
     def _start_process(self):
-        logger.info(f"Spawning CLI process: {' '.join(self.command)}")
-        self.process = subprocess.Popen(
-            self.command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, 
-            text=True,
-            bufsize=0 
-        )
+        logger.info(f"Spawning CLI process with exact command:\n{' '.join(self.command)}")
         
-        logger.info("Waiting for model to load and initialization to complete...")
-        self._read_until_marker()
-        logger.info("Model is loaded and ready for prompts.")
+        try:
+            self.process = subprocess.Popen(
+                self.command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, # Combines stderr into stdout stream
+                text=True,
+                bufsize=0 
+            )
+        except Exception as e:
+            logger.error(f"FATAL: Python failed to launch the executable. Error: {e}")
+            raise e
+            
+        # --- DEBUG: Immediate Crash Check ---
+        time.sleep(0.5) # Give the binary 500ms to fail on argument parsing
+        return_code = self.process.poll()
+        if return_code is not None:
+            stdout_left, _ = self.process.communicate()
+            logger.error(f"FATAL: Process crashed instantly with Exit Code {return_code}.")
+            logger.error(f"--- INSTANT CRASH OUTPUT ---\n{stdout_left.strip()}\n----------------------------")
+            raise RuntimeError("CLI terminated immediately after launch.")
+        
+        logger.info("CLI spawned successfully. Beginning initialization sequence...")
+        self._read_until_marker(is_initializing=True)
+        logger.info("Initialization complete. Model is fully loaded and ready for prompts.")
 
-    def _read_until_marker(self) -> str:
+    def _read_until_marker(self, is_initializing=False) -> str:
         result_chars = []
         suffix_buffer = ""
+        line_buffer = ""
         marker_len = len(self.prompt_marker)
         
         while True:
             char = self.process.stdout.read(1)
             
             if not char:
+                # --- DEBUG: EOF Crash Check ---
+                return_code = self.process.poll()
                 crash_log = "".join(result_chars).strip()
-                logger.error(f"CLI process EOF reached unexpectedly.\nLast output before crash:\n{crash_log}")
+                logger.error(f"FATAL: CLI process stream closed unexpectedly. Exit Code: {return_code}")
+                if return_code in [-9, 137]:
+                    logger.error("HINT: Exit code -9/137 usually means Out of Memory (OOM Kill by OS).")
+                logger.error(f"--- LAST OUTPUT BEFORE CRASH ---\n{crash_log}\n--------------------------------")
                 break
                 
             result_chars.append(char)
             suffix_buffer += char
+            line_buffer += char
+            
+            # --- DEBUG: Real-Time Line Streaming ---
+            # If we hit a newline during the heavy initialization phase, print it to the console!
+            if is_initializing and char == '\n':
+                logger.info(f"[CLI INIT] {line_buffer.strip()}")
+                line_buffer = ""
             
             if len(suffix_buffer) > marker_len:
                 suffix_buffer = suffix_buffer[-marker_len:]
@@ -185,7 +204,7 @@ class InteractiveDiffusionCLI:
             self.process.stdin.write(prompt + "\n")
             self.process.stdin.flush()
             
-            response = self._read_until_marker()
+            response = self._read_until_marker(is_initializing=False)
             logger.info("Finished receiving generation.")
             return response
 
@@ -215,7 +234,6 @@ class InteractiveDiffusionCLI:
             logger.info("Initializing a brand new chat session...")
             self._start_process()
             return "Successfully reset! Sent '/exit' to clean up the previous session, and a new conversation context is ready."
-
 
 cli_manager = InteractiveDiffusionCLI(BASE_COMMAND, args.mcp_prompt_marker)
 
@@ -251,7 +269,7 @@ def main():
     try:
         cli_manager.start()
     except Exception as e:
-        logger.error(f"Failed to start CLI process during initialization: {e}")
+        logger.error(f"Server Startup Aborted: {e}")
         sys.exit(1)
         
     mcp.run()
