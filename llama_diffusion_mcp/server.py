@@ -143,7 +143,22 @@ mcp = FastMCP("LlamaDiffusionBridge")
 @mcp.tool()
 def generate_diffusion_text(prompt: str) -> str:
     """
-    Generates text using a diffusion-based LLM. This is a one-shot process.
+    Generates text using a diffusion-based LLM.
+    
+    CRITICAL INSTRUCTIONS FOR AI AGENTS:
+    This tool operates in a stateless, ONE-SHOT generation mode to optimize VRAM. 
+    It does NOT maintain conversation history or memory between tool calls.
+    
+    To maintain a continuous, multi-turn chat context, you MUST:
+    1. Pass the ENTIRE conversation history and system prompt inside the `prompt` string.
+    2. Format the string exactly using the specific chat template required by the 
+       loaded GGUF model (e.g., ChatML, Gemma `<start_of_turn>user...`, or Llama-3).
+    
+    Warning: If you only pass the user's latest message, the diffusion model will 
+    suffer from complete amnesia and treat it as the first message of a brand new conversation.
+    
+    Args:
+        prompt: The fully formatted chat history string ending with the model's generation trigger.
     """
     command = BASE_COMMAND.copy()
     command.extend(["-p", prompt])
