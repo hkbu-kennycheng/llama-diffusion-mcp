@@ -69,14 +69,14 @@ args, unknown_args = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + unknown_args # Clean args for FastMCP
 
 # ==========================================
-# 2. Build Base CLI Command Dynamically
+# 2. Build Base CLI Command
 # ==========================================
 CLI_EXECUTABLE = os.environ.get("LLAMA_DIFFUSION_CLI_PATH", "llama-diffusion-cli")
 logger.info(f"Using llama-diffusion-cli executable location: {CLI_EXECUTABLE}")
 
-BASE_COMMAND = [CLI_EXECUTABLE, "-m", args.model]
+# Enforce -cnv (Conversation/Interactive mode) so the background process stays alive
+BASE_COMMAND = [CLI_EXECUTABLE, "-m", args.model, "-cnv"]
 
-# Dynamic mapping of argparse variables to their actual CLI flags
 FLAG_MAPPING = {
     "n_gpu_layers": "-ngl", "threads": "-t", "flash_attn": "-fa", 
     "ctx_size": "-c", "ubatch_size": "-ub", "batch_size": "-b",
@@ -93,13 +93,11 @@ FLAG_MAPPING = {
     "temp": "--temp", "top_k": "--top-k", "top_p": "--top-p", "min_p": "--min-p"
 }
 
-# Append all explicitly provided values
 for arg_name, cli_flag in FLAG_MAPPING.items():
     val = getattr(args, arg_name, None)
     if val is not None:
         BASE_COMMAND.extend([cli_flag, str(val)])
 
-# Append boolean action flags
 if args.diffusion_visual:
     BASE_COMMAND.append("--diffusion-visual")
 if args.diffusion_visual_progress:
@@ -201,6 +199,7 @@ class InteractiveDiffusionCLI:
             logger.info("Initializing a brand new chat session...")
             self._start_process()
             return "Successfully reset! Sent '/exit' to clean up the previous session, and a new conversation context is ready."
+
 
 cli_manager = InteractiveDiffusionCLI(BASE_COMMAND, args.mcp_prompt_marker)
 
