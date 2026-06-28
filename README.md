@@ -23,7 +23,7 @@ A robust, bidirectional [Model Context Protocol (MCP)](https://modelcontextproto
 ## 🚀 Quick Start & Installation
 
 ```bash
-uv run --with git+https://github.com/hkbu-kennycheng/llama-diffusion-cli-mcp.git llama-diffusion-mcp -- -m /path/to/your/model.gguf
+uv run --with git+https://github.com/hkbu-kennycheng/llama-diffusion-mcp.git llama-diffusion-mcp -hf unsloth/diffusiongemma-26B-A4B-it-GGUF:Q4_K_M -ngl 99 -n 128000
 
 ```
 
@@ -47,13 +47,11 @@ To use this bridge with Claude Desktop (or any other MCP Client), add the server
       "command": "uv",
       "args": [
         "run",
-        "--with", "git+https://github.com/hkbu-kennycheng/llama-diffusion-cli-mcp.git",
+        "--with", "git+https://github.com/hkbu-kennycheng/llama-diffusion-mcp.git",
         "llama-diffusion-mcp",
-        "-m", "/absolute/path/to/llada-8b.gguf",
-        "-i",
-        "-ub", "512",
-        "--diffusion-steps", "256",
-        "--mcp-prompt-marker", "> "
+        "-hf", "unsloth/diffusiongemma-26B-A4B-it-GGUF:Q4_K_M",
+        "-ngl", "99",
+        "-n", "128000"
       ],
       "env": {
         "LLAMA_DIFFUSION_CLI_PATH": "/absolute/path/to/llama.cpp/build/bin/llama-diffusion-cli"
