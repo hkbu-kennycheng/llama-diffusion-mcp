@@ -1,0 +1,18 @@
+[project]
+name = "llama-diffusion-mcp"
+version = "0.1.0"
+description = "A Model Context Protocol (MCP) server bridging requests to llama-diffusion-cli"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastmcp>=0.4.1",
+]
+
+# This maps a command-line shortcut directly to your script's execution function
+[project.scripts]
+llama-diffusion-mcp = "server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
