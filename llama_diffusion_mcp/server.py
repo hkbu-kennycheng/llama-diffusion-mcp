@@ -19,45 +19,91 @@ logger = logging.getLogger(__name__)
 # ==========================================
 # 1. Parse Initialization Parameters
 # ==========================================
-parser = argparse.ArgumentParser(description="Bidirectional FastMCP Bridge for llama-diffusion-cli")
+parser = argparse.ArgumentParser(description="Persistent FastMCP Bridge for llama-diffusion-cli")
 
+# MCP Bridge Specific
 parser.add_argument("--mcp-prompt-marker", type=str, default="> ", 
                     help="The string the CLI prints when waiting for user input (default: '> ')")
 
-# Model and Diffusion Parameters
+# Core Model & Performance Parameters
 parser.add_argument("-m", "--model", type=str, required=True, help="Path to the GGUF model file")
-parser.add_argument("-ub", "--ubatch-size", type=int)
+parser.add_argument("-ngl", "--n-gpu-layers", type=int, help="Max number of layers to store in VRAM")
+parser.add_argument("-t", "--threads", type=int, help="Number of CPU threads to use")
+parser.add_argument("-fa", "--flash-attn", type=str, choices=["on", "off", "auto"])
 parser.add_argument("-c", "--ctx-size", type=int)
-parser.add_argument("-i", "--interactive", action="store_true", help="Run in interactive mode")
+parser.add_argument("-ub", "--ubatch-size", type=int)
+parser.add_argument("-b", "--batch-size", type=int)
+
+# Core Diffusion Parameters
 parser.add_argument("--diffusion-steps", type=int)
+parser.add_argument("--diffusion-blocks", type=int)
+parser.add_argument("--diffusion-visual", action="store_true")
+parser.add_argument("--diffusion-visual-progress", action="store_true")
+parser.add_argument("--diffusion-visual-interval", type=int)
+parser.add_argument("--diffusion-eps", type=float)
 parser.add_argument("--diffusion-algorithm", type=int)
+parser.add_argument("--diffusion-alg-temp", type=float)
+parser.add_argument("--diffusion-block-length", type=int)
+parser.add_argument("--diffusion-cfg-scale", type=float)
+parser.add_argument("--diffusion-add-gumbel-noise", type=float)
+
+# Entropy-Bound (DiffusionGemma Specific Optimizations)
+parser.add_argument("--diffusion-eb", type=str, choices=["auto", "on", "off"])
+parser.add_argument("--diffusion-eb-t-min", type=float)
+parser.add_argument("--diffusion-eb-t-max", type=float)
+parser.add_argument("--diffusion-eb-entropy-bound", type=float)
+parser.add_argument("--diffusion-eb-stability", type=int)
+parser.add_argument("--diffusion-eb-confidence", type=float)
+parser.add_argument("--diffusion-eb-max-steps", type=int)
+parser.add_argument("--diffusion-kv-cache", type=str, choices=["auto", "on", "off"])
+parser.add_argument("--diffusion-gpu-sampling", type=str, choices=["auto", "on", "off"])
+parser.add_argument("--diffusion-gpu-sample-reduce", type=str, choices=["auto", "on", "off"])
+
+# Standard Sampling
 parser.add_argument("--temp", type=float)
+parser.add_argument("--top-k", type=int)
+parser.add_argument("--top-p", type=float)
+parser.add_argument("--min-p", type=float)
 
 args, unknown_args = parser.parse_known_args()
 sys.argv = [sys.argv[0]] + unknown_args # Clean args for FastMCP
 
 # ==========================================
-# 2. Resolve Executable Path via Environment Variable
+# 2. Build Base CLI Command Dynamically
 # ==========================================
-# Looks for LLAMA_DIFFUSION_CLI_PATH in the environment. Defaults to global command if missing.
 CLI_EXECUTABLE = os.environ.get("LLAMA_DIFFUSION_CLI_PATH", "llama-diffusion-cli")
 logger.info(f"Using llama-diffusion-cli executable location: {CLI_EXECUTABLE}")
 
-# Build Base CLI Command
 BASE_COMMAND = [CLI_EXECUTABLE, "-m", args.model]
 
-if args.interactive:
-    BASE_COMMAND.append("-i")
-if args.ubatch_size is not None:
-    BASE_COMMAND.extend(["-ub", str(args.ubatch_size)])
-if args.ctx_size is not None:
-    BASE_COMMAND.extend(["-c", str(args.ctx_size)])
-if args.diffusion_steps is not None:
-    BASE_COMMAND.extend(["--diffusion-steps", str(args.diffusion_steps)])
-if args.diffusion_algorithm is not None:
-    BASE_COMMAND.extend(["--diffusion-algorithm", str(args.diffusion_algorithm)])
-if args.temp is not None:
-    BASE_COMMAND.extend(["--temp", str(args.temp)])
+# Dynamic mapping of argparse variables to their actual CLI flags
+FLAG_MAPPING = {
+    "n_gpu_layers": "-ngl", "threads": "-t", "flash_attn": "-fa", 
+    "ctx_size": "-c", "ubatch_size": "-ub", "batch_size": "-b",
+    "diffusion_steps": "--diffusion-steps", "diffusion_blocks": "--diffusion-blocks",
+    "diffusion_visual_interval": "--diffusion-visual-interval",
+    "diffusion_eps": "--diffusion-eps", "diffusion_algorithm": "--diffusion-algorithm",
+    "diffusion_alg_temp": "--diffusion-alg-temp", "diffusion_block_length": "--diffusion-block-length",
+    "diffusion_cfg_scale": "--diffusion-cfg-scale", "diffusion_add_gumbel_noise": "--diffusion-add-gumbel-noise",
+    "diffusion_eb": "--diffusion-eb", "diffusion_eb_t_min": "--diffusion-eb-t-min",
+    "diffusion_eb_t_max": "--diffusion-eb-t-max", "diffusion_eb_entropy_bound": "--diffusion-eb-entropy-bound",
+    "diffusion_eb_stability": "--diffusion-eb-stability", "diffusion_eb_confidence": "--diffusion-eb-confidence",
+    "diffusion_eb_max_steps": "--diffusion-eb-max-steps", "diffusion_kv_cache": "--diffusion-kv-cache",
+    "diffusion_gpu_sampling": "--diffusion-gpu-sampling", "diffusion_gpu_sample_reduce": "--diffusion-gpu-sample-reduce",
+    "temp": "--temp", "top_k": "--top-k", "top_p": "--top-p", "min_p": "--min-p"
+}
+
+# Append all explicitly provided values
+for arg_name, cli_flag in FLAG_MAPPING.items():
+    val = getattr(args, arg_name, None)
+    if val is not None:
+        BASE_COMMAND.extend([cli_flag, str(val)])
+
+# Append boolean action flags
+if args.diffusion_visual:
+    BASE_COMMAND.append("--diffusion-visual")
+if args.diffusion_visual_progress:
+    BASE_COMMAND.append("--diffusion-visual-progress")
 
 
 # ==========================================
@@ -69,13 +115,12 @@ class InteractiveDiffusionCLI:
         self.prompt_marker = prompt_marker
         self.process = None
         self.lock = threading.Lock()
-        
+
     def start(self):
-        """Eagerly starts the background CLI process."""
         with self.lock:
             if self.process is None or self.process.poll() is not None:
                 self._start_process()
-        
+                
     def _start_process(self):
         logger.info(f"Spawning CLI process: {' '.join(self.command)}")
         self.process = subprocess.Popen(
@@ -92,7 +137,6 @@ class InteractiveDiffusionCLI:
         logger.info("Model is loaded and ready for prompts.")
 
     def _read_until_marker(self) -> str:
-        """Reads character by character until the prompt marker is found."""
         result_chars = []
         suffix_buffer = ""
         marker_len = len(self.prompt_marker)
@@ -118,9 +162,9 @@ class InteractiveDiffusionCLI:
         return "".join(result_chars).strip()
 
     def generate(self, prompt: str) -> str:
-        """Thread-safe method to send a prompt and get the response."""
         with self.lock:
             if self.process is None or self.process.poll() is not None:
+                logger.warning("CLI process was dead. Restarting...")
                 self._start_process()
                 
             logger.info(f"Sending prompt to model: {prompt}")
@@ -132,7 +176,6 @@ class InteractiveDiffusionCLI:
             return response
 
     def reset_session(self) -> str:
-        """Terminates the current process gracefully via /exit and pre-boots a fresh session."""
         with self.lock:
             if self.process is not None and self.process.poll() is None:
                 logger.info("Sending graceful '/exit' command to llama-diffusion-cli...")
@@ -159,8 +202,6 @@ class InteractiveDiffusionCLI:
             self._start_process()
             return "Successfully reset! Sent '/exit' to clean up the previous session, and a new conversation context is ready."
 
-
-# Instantiate our persistent manager globally
 cli_manager = InteractiveDiffusionCLI(BASE_COMMAND, args.mcp_prompt_marker)
 
 # ==========================================
@@ -191,16 +232,13 @@ def restart_chat_session() -> str:
         return f"Error trying to restart the session: {str(e)}"
 
 def main():
-    """Entry point for command line execution via uv."""
     logger.info("Eagerly initializing llama-diffusion-cli process on startup...")
     try:
-        # Start the subprocess immediately instead of waiting for a tool call
         cli_manager.start()
     except Exception as e:
         logger.error(f"Failed to start CLI process during initialization: {e}")
         sys.exit(1)
         
-    # Start the FastMCP server loop
     mcp.run()
 
 if __name__ == "__main__":
