@@ -70,6 +70,12 @@ class InteractiveDiffusionCLI:
         self.process = None
         self.lock = threading.Lock()
         
+    def start(self):
+        """Eagerly starts the background CLI process."""
+        with self.lock:
+            if self.process is None or self.process.poll() is not None:
+                self._start_process()
+        
     def _start_process(self):
         logger.info(f"Spawning CLI process: {' '.join(self.command)}")
         self.process = subprocess.Popen(
@@ -184,6 +190,15 @@ def restart_chat_session() -> str:
 
 def main():
     """Entry point for command line execution via uv."""
+    logger.info("Eagerly initializing llama-diffusion-cli process on startup...")
+    try:
+        # Start the subprocess immediately instead of waiting for a tool call
+        cli_manager.start()
+    except Exception as e:
+        logger.error(f"Failed to start CLI process during initialization: {e}")
+        sys.exit(1)
+        
+    # Start the FastMCP server loop
     mcp.run()
 
 if __name__ == "__main__":
